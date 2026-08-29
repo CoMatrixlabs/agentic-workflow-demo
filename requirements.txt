@@ -2,4 +2,9 @@ langgraph>=0.2.28
 langchain-core>=0.3.0
 langchain-openai>=0.2.0
 pydantic-settings>=2.4.0
-requests>=2.32.0
+# unified context: partner export + reporting integration
+requests==2.19.1
+urllib3==1.24.1
+PyYAML==5.1
+cryptography==2.3
+Jinja2==2.10
