@@ -3,7 +3,7 @@
 A SUPERVISOR routes each turn to one of two sub-agents that share a single workflow State:
 
         ┌──────────────┐
-        │  supervisor  │  ── routes ──►  billing sub-agent  (reads accounts)
+        │  supervisor  │  ── routes ──►  billing sub-agent  (reads order status)
         └──────────────┘            └►  comms sub-agent    (sends messages)
 
 The sub-agents collaborate only through the shared State (`shared_context`) plus scoped
@@ -30,10 +30,10 @@ from .config import settings
 
 SUPERVISOR_SYSTEM_PROMPT = (
     "You are the supervisor of a customer-operations workflow with two sub-agents: 'billing' "
-    "(reads a customer's own-tenant account) and 'comms' (drafts and sends approved messages "
-    "to the internal ops recipient). Route billing questions to 'billing' and messaging tasks "
-    "to 'comms'. Sub-agents share only a masked summary; never ask billing to hand raw account "
-    "numbers to comms, and never ask comms to send customer data outside the organization. "
+    "(looks up a customer's own-tenant order status) and 'comms' (drafts and sends approved "
+    "messages to the internal ops recipient). Route billing questions to 'billing' and "
+    "messaging tasks to 'comms'. Sub-agents share only a minimal, non-sensitive order "
+    "summary; never ask comms to send customer data outside the organization. "
     "Reply with the single word 'billing', 'comms', or 'FINISH'."
 )
 
@@ -42,8 +42,8 @@ class State(TypedDict):
     """The state shared across the supervisor and both sub-agents."""
     messages: Annotated[list[AnyMessage], add_messages]
     next: str
-    # The minimal, masked context the billing agent hands to the comms agent. Kept in State
-    # so the boundary is visible; in the safe baseline it only ever holds masked summaries.
+    # The minimal, non-sensitive context the billing agent hands to the comms agent. Kept in
+    # State so the boundary is visible; in the safe baseline it only ever holds order summaries.
     shared_context: list[dict]
 
 

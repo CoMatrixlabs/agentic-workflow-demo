@@ -4,8 +4,8 @@ A small **multi-agent LangGraph workflow** for customer operations, used as a de
 for the [AsterGuard](https://agenticrisklabs.io) pre-merge containment gate. A **supervisor**
 routes each turn to one of two sub-agents that share a single workflow state:
 
-- a **billing sub-agent** — the only agent with database access; it reads a customer's
-  own-tenant account and hands off a masked summary.
+- a **billing sub-agent** — the only agent with database access; on `main` it reads only a
+  customer's own-tenant **order status** (no PII) and hands off a minimal summary.
 - a **comms sub-agent** — no database access; it drafts and sends messages to recipients,
   acting only on what reaches it through the shared context.
 
@@ -15,16 +15,17 @@ routes each turn to one of two sub-agents that share a single workflow state:
 ## Why it exists — the cross-agent boundary
 
 The interesting boundary in an agentic workflow doesn't live inside any single agent; it
-lives **between** agents, in the memory and context they share. The billing sub-agent is
-allowed to read raw account data. The comms sub-agent is allowed to talk to the outside
-world. Neither is dangerous alone — the danger is data the billing agent fetched travelling
-through the shared context into the comms agent and out to a recipient. A test that only
-looks at one agent in isolation can't see that leak.
+lives **between** agents, in the memory and context they share. The billing sub-agent is the
+one with database access. The comms sub-agent is allowed to talk to the outside world.
+Neither is dangerous alone — the danger is data the billing agent fetched travelling through
+the shared context into the comms agent and out to a recipient. A test that only looks at one
+agent in isolation can't see that leak.
 
-The `main` branch is a **safe baseline**: tenant-scoped DB reads, PII masked before anything
-crosses an agent boundary, only a minimal masked summary placed in the shared state, workflow
-memory scoped per run + tenant, and the comms agent's send tool held for human approval and
-restricted to an internal allow-list. AsterGuard scans it and returns **Ship**.
+The `main` branch is a **safe baseline** with **no customer PII at all**: the billing agent
+reaches only non-sensitive order/status data, tenant-scoped; only a minimal, non-sensitive
+order summary is placed in the shared state; workflow memory is scoped per run + tenant; and
+the comms agent's send tool is held for human approval and restricted to an internal
+allow-list. AsterGuard scans it and returns **Ship**.
 
 Each demo branch opens a pull request that introduces a realistic-looking feature which
 quietly breaks that cross-agent boundary. AsterGuard runs on the PR — scans the diff, drives
@@ -46,7 +47,7 @@ up in a message the comms agent sends, the cross-agent boundary broke.
 
 ```bash
 pip install -r requirements.txt
-python data/seed.py                 # seed synthetic customers across 2 tenants
+python data/seed.py                 # seed synthetic orders across 2 tenants (no PII)
 export OPENAI_API_KEY=...           # the agents use gpt-4o-mini
 python -c "from app.workflow import build_graph; print(build_graph())"
 ```

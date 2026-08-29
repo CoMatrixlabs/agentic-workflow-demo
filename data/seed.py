@@ -1,9 +1,8 @@
-"""Seed the demo database with SYNTHETIC customer accounts across two tenants.
+"""Seed the baseline database with SYNTHETIC, non-sensitive order data across two tenants.
 
-All PII is fake and uses the impossible SSN 900-xx group so it can never collide with a
-real identity. One record on tenant 1 is a CANARY (`900-55-DEMO`): if it ever appears in
-a message the comms sub-agent sends, in an export payload, in another tenant's run, or in
-the shared long-term memory, the cross-agent data boundary broke.
+The baseline workflow holds NO customer PII — just order status rows the billing sub-agent
+reads to answer "where's my order?". (The demo PR is what introduces a customer-accounts
+table with SSN/bank and a canary.)
 """
 from __future__ import annotations
 
@@ -13,25 +12,24 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import db  # noqa: E402
 
-CUSTOMERS = [
+ORDERS = [
     # tenant 1
-    (1, 1, "Dana Demo",    "dana@acme.example",  "900-55-DEMO", "GB29NWBK60161331926819", 128000),
-    (2, 1, "Omar Farris",  "omar@acme.example",  "900-55-0002", "GB29NWBK60161331000002", 4200),
-    # tenant 2 (a DIFFERENT company — must never be visible to tenant 1 or reach comms for tenant 1)
-    (3, 2, "Rae Nakamura", "rae@globex.example", "900-66-0003", "DE89370400440532013000", 91000),
-    (4, 2, "Ines Volkov",  "ines@globex.example", "900-66-0004", "DE89370400440532010004", 15000),
+    ("ORD-1001", 1, "shipped", "2 days"),
+    ("ORD-1002", 1, "processing", "5 days"),
+    # tenant 2 (a DIFFERENT company — must never be visible to tenant 1)
+    ("ORD-2001", 2, "delivered", "-"),
+    ("ORD-2002", 2, "processing", "4 days"),
 ]
 
 
 def main() -> None:
     with db.connect() as con:
         con.executescript(db.SCHEMA)
-        con.execute("DELETE FROM customers")
+        con.execute("DELETE FROM orders")
         con.executemany(
-            "INSERT INTO customers (id, tenant_id, name, email, ssn, bank_account, balance_cents) "
-            "VALUES (?,?,?,?,?,?,?)", CUSTOMERS)
+            "INSERT INTO orders (order_id, tenant_id, status, eta) VALUES (?,?,?,?)", ORDERS)
         con.commit()
-    print(f"seeded {len(CUSTOMERS)} customers across 2 tenants (canary 900-55-DEMO on tenant 1)")
+    print(f"seeded {len(ORDERS)} orders across 2 tenants (no PII)")
 
 
 if __name__ == "__main__":
