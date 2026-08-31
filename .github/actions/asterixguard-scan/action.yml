@@ -136,6 +136,8 @@ runs:
         APP_ID:  ${{ inputs.app-id }}
         API_URL: ${{ inputs.api-url }}
         SCAN_DIR: ${{ steps.scan.outputs.scan_dir }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_URL: ${{ github.event.pull_request.html_url }}
       run: |
         set -euo pipefail
         # Fall back to the hosted demo endpoint if the repo var is unset/empty, so the action
@@ -145,31 +147,18 @@ runs:
         tar czf scan.tar.gz "$(basename "$SCAN_DIR")"
         TARBALL_B64=$(base64 < scan.tar.gz | tr -d '\n')
 
-        BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
-        SHA="$GITHUB_SHA"
-        AUTHOR="$GITHUB_ACTOR"
-        REPO_NAME="${GITHUB_REPOSITORY##*/}"
-        REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+        export BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+        export SHA="$GITHUB_SHA"
+        export AUTHOR="$GITHUB_ACTOR"
+        export REPO_NAME="${GITHUB_REPOSITORY##*/}"
+        export REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+        export TARBALL_B64
         PR_NUMBER="${PR_NUMBER:-}"
         PR_URL="${PR_URL:-}"
 
-        # JSON body via Python (safer than bash heredoc + quoting)
-        BODY=$(python3 - <<PY
-        import json, os
-        body = {
-            "app_id": os.environ["APP_ID"],
-            "repo_slug": os.environ["REPO_NAME"],
-            "repo_url": os.environ["REPO_URL"],
-            "branch": os.environ["BRANCH"],
-            "commit_sha": os.environ["SHA"],
-            "pr_number": int(os.environ["PR_NUMBER"]) if os.environ.get("PR_NUMBER") else None,
-            "pr_url": os.environ.get("PR_URL") or None,
-            "author_name": os.environ["AUTHOR"],
-            "scan_tarball_b64": os.environ["TARBALL_B64"],
-        }
-        print(json.dumps(body))
-        PY
-        )
+        # JSON body via Python one-liner (no heredoc — heredocs break under YAML indentation).
+        # Reads the exported env vars above.
+        BODY=$(python3 -c 'import json,os; print(json.dumps({"app_id":os.environ["APP_ID"],"repo_slug":os.environ["REPO_NAME"],"repo_url":os.environ["REPO_URL"],"branch":os.environ.get("BRANCH") or None,"commit_sha":os.environ["SHA"],"pr_number":int(os.environ["PR_NUMBER"]) if os.environ.get("PR_NUMBER") else None,"pr_url":os.environ.get("PR_URL") or None,"author_name":os.environ["AUTHOR"],"scan_tarball_b64":os.environ["TARBALL_B64"]}))')
 
         echo "::group::POST $API_URL/scans/ingest"
         RESP=$(curl -fsSL --max-time 120 -X POST "${API_URL}/scans/ingest" \
@@ -199,9 +188,6 @@ runs:
           echo "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("comment_markdown",""))'
           echo "__ASTERIX_EOF__"
         } >> "$GITHUB_OUTPUT"
-      env:
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        PR_URL: ${{ github.event.pull_request.html_url }}
 
     - name: Post sticky PR comment
       if: github.event_name == 'pull_request'
