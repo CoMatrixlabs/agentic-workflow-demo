@@ -1,0 +1,40 @@
+name: AsterixGuard
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Minimum needed: PRs need write to post the sticky comment.
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+concurrency:
+  group: asterixguard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: AsterixGuard scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # PRs: scan the head ref. Push: scan the SHA.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: AsterixGuard scan + ingest
+        uses: ./.github/actions/asterixguard-scan
+        with:
+          # Application id registered in AsterixGuard (the repo's app slug). See README §3.
+          app-id: agentic-workflow-demo
+          # AsterixGuard API endpoint. Defaults to the hosted demo endpoint below; override with
+          # a repo variable ASTERIXGUARD_API_URL (e.g. your self-hosted URL) without editing this file.
+          api-url: ${{ vars.ASTERIXGUARD_API_URL || 'https://demo.agenticrisklabs.io/api/cicd' }}
+          # If you have asterllmguard2 on a private wheel/git ref, override here.
+          # scanner-install-cmd: pip install git+https://${{ secrets.SCANNER_TOKEN }}@github.com/your/asterllmguard2.git@main
