@@ -1,40 +1,41 @@
 name: 'AsterixGuard Scan'
-description: 'Run asterllmguard2 in CI, ingest scan output into AsterixGuard, post PR sticky comment.'
+description: 'Run the real AsterixGuard pipeline on a PR diff, gate the merge, post a sticky PR comment.'
 author: 'Asterix'
 
 inputs:
   app-id:
-    description: 'Application id registered in AsterixGuard (e.g. agentops-hub)'
+    description: 'Application id registered in AsterixGuard (the repo''s app slug).'
     required: true
   api-url:
     description: 'AsterixGuard API base URL (no trailing slash). Defaults to the hosted demo endpoint.'
     required: false
     default: 'https://demo.agenticrisklabs.io/api/cicd'
-  scanner-install-cmd:
-    description: |
-      Command used to install asterllmguard2 onto the GH-hosted runner. Default tries pip;
-      on failure the action falls back to stub artifacts so the workflow still completes
-      (useful when the scanner isn't publicly installable on the demo box).
+  token:
+    description: 'Org scan token (sent as X-ARS-Token) when the instance enforces ingest auth. Optional against the open demo endpoint.'
     required: false
-    default: 'pip install asterllmguard2'
+    default: ''
   github-token:
     description: 'GitHub token used to post the sticky PR comment.'
     required: false
     default: ${{ github.token }}
+  timeout-seconds:
+    description: 'How long to wait for the server-side scan to finish before falling back to the ingest verdict.'
+    required: false
+    default: '600'
 
 outputs:
   gate:
-    description: 'Gate decision returned by AsterixGuard (ALLOWED / REVIEW_REQUIRED / BLOCKED).'
-    value: ${{ steps.ingest.outputs.gate }}
+    description: 'Gate decision (ALLOWED / REVIEW_REQUIRED / BLOCKED) from the real scan.'
+    value: ${{ steps.realscan.outputs.gate || steps.ingest.outputs.gate }}
   ars-score:
     description: 'Numeric ARS score (0-100).'
-    value: ${{ steps.ingest.outputs.ars }}
+    value: ${{ steps.realscan.outputs.ars || steps.ingest.outputs.ars }}
   veto:
     description: 'Comma-separated list of veto rules fired (empty if none).'
-    value: ${{ steps.ingest.outputs.veto }}
+    value: ${{ steps.realscan.outputs.veto || steps.ingest.outputs.veto }}
   dashboard-url:
     description: 'Deep link into the AsterixGuard dashboard for this scan.'
-    value: ${{ steps.ingest.outputs.dashboard }}
+    value: ${{ steps.realscan.outputs.dashboard || steps.ingest.outputs.dashboard }}
   scan-run-id:
     description: 'Server-side scan_run_id (= job_id in the Jobs Timeline).'
     value: ${{ steps.ingest.outputs.scan_run_id }}
@@ -42,173 +43,111 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-
-    - name: Install asterllmguard2 (or fall back to stub mode)
-      id: install
-      shell: bash
-      env:
-        SCANNER_INSTALL_CMD: ${{ inputs.scanner-install-cmd }}
-      run: |
-        set +e
-        echo "::group::Installing scanner"
-        eval "$SCANNER_INSTALL_CMD"
-        rc=$?
-        echo "::endgroup::"
-        if [ "$rc" -ne 0 ] || ! command -v asterllmguard2 >/dev/null 2>&1; then
-          echo "::warning::asterllmguard2 unavailable on this runner — falling back to stub-scanner mode."
-          echo "stub=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "stub=false" >> "$GITHUB_OUTPUT"
-        fi
-
-    - name: Run scan
-      id: scan
-      shell: bash
-      env:
-        STUB: ${{ steps.install.outputs.stub }}
-      run: |
-        set -euo pipefail
-        OUT="$RUNNER_TEMP/asterix-scan"
-        mkdir -p "$OUT/benchmarks"
-        echo "scan_dir=$OUT" >> "$GITHUB_OUTPUT"
-
-        if [ "$STUB" = "true" ]; then
-          # Emit minimal valid artifacts. The AsterixGuard API derives the verdict
-          # from the branch name, not the artifact contents, so this is enough.
-          cat > "$OUT/report.sarif" <<'SARIF'
-        {"version":"2.1.0","$schema":"https://json.schemastore.org/sarif-2.1.0.json",
-         "runs":[{"tool":{"driver":{"name":"asterllmguard2","version":"stub"}},"results":[]}]}
-        SARIF
-          echo '{"components":[]}' > "$OUT/components.json"
-          echo '{"nodes":[],"edges":[]}' > "$OUT/graph.json"
-          for k in owasp_llm code_analysis infrastructure compliance; do
-            echo "{\"kind\":\"$k\",\"results\":[]}" > "$OUT/benchmarks/$k.json"
-          done
-          echo "::notice::Stub scan emitted to $OUT"
-        else
-          echo "::group::Running asterllmguard2"
-          asterllmguard2 scan . \
-            --release-id "${GITHUB_SHA}" \
-            --graph graph-cicd \
-            --graph-output "$OUT/graph.json" \
-            --result-json "$OUT/result.json" \
-            -f sarif -o "$OUT/report.sarif" \
-            --with-iac --with-benchmarks \
-            --benchmark-output "$OUT/benchmarks" \
-            --benchmark-no-epss \
-            --verbose
-          asterllmguard2 list-components . -o "$OUT/components.json"
-          echo "::endgroup::"
-        fi
-
-        ls -la "$OUT"
-        ls -la "$OUT/benchmarks"
-
-    - name: Guard (static check gate)
-      id: guard
-      if: steps.install.outputs.stub != 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        OUT="${{ steps.scan.outputs.scan_dir }}"
-        IN="$OUT/result.json"; [ -f "$IN" ] || IN="$OUT/components.json"
-        echo "::group::asterllmguard2 guard"
-        # Post-scan static check registry → gate. Bundled into the tarball below.
-        asterllmguard2 guard "$IN" \
-          -f json -o "$OUT/guard.json" \
-          --graph graph-cicd --graph-output "$OUT/guard-graph.json" || true
-        echo "::endgroup::"
-        if [ -f "$OUT/guard.json" ]; then
-          GATE=$(python3 -c "import json,sys;print(json.load(open('$OUT/guard.json'))['gate']['gate'])" 2>/dev/null || echo "UNKNOWN")
-          FIRED=$(python3 -c "import json,sys;print(json.load(open('$OUT/guard.json'))['gate']['fired'])" 2>/dev/null || echo "?")
-          echo "guard-gate=$GATE" >> "$GITHUB_OUTPUT"
-          echo "::notice title=AsterixGuard static checks::gate=$GATE ($FIRED checks fired)"
-        fi
-
-    - name: Package + POST to AsterixGuard
+    # The AsterixGuard scanner is not run on the GH-hosted runner. Instead the runner registers the
+    # build and the SERVER runs the real asterllmguard2 pipeline on the PR diff (SAST · secrets · IaC
+    # · behavioral + the LLM/Presidio data-access model). The runner then polls for that real verdict
+    # and gates the merge on it. This keeps the scanner off untrusted runners and needs no private
+    # wheel, while still producing a genuine per-build result — not a stubbed verdict.
+    - name: Register build + trigger AsterixGuard scan
       id: ingest
       shell: bash
       env:
         APP_ID:  ${{ inputs.app-id }}
         API_URL: ${{ inputs.api-url }}
-        SCAN_DIR: ${{ steps.scan.outputs.scan_dir }}
+        ARS_TOKEN: ${{ inputs.token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_URL: ${{ github.event.pull_request.html_url }}
       run: |
         set -euo pipefail
-        # Fall back to the hosted demo endpoint if the repo var is unset/empty, so the action
-        # works out-of-the-box without configuring ASTERIXGUARD_API_URL.
         API_URL="${API_URL:-https://demo.agenticrisklabs.io/api/cicd}"
-        cd "$(dirname "$SCAN_DIR")"
-        tar czf scan.tar.gz "$(basename "$SCAN_DIR")"
-        TARBALL_B64=$(base64 < scan.tar.gz | tr -d '\n')
-
         export BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
         export SHA="$GITHUB_SHA"
         export AUTHOR="$GITHUB_ACTOR"
         export REPO_NAME="${GITHUB_REPOSITORY##*/}"
         export REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
-        export TARBALL_B64
-        PR_NUMBER="${PR_NUMBER:-}"
-        PR_URL="${PR_URL:-}"
+        PR_NUMBER="${PR_NUMBER:-}"; PR_URL="${PR_URL:-}"
 
         # JSON body via Python one-liner (no heredoc — heredocs break under YAML indentation).
-        # Reads the exported env vars above.
-        BODY=$(python3 -c 'import json,os; print(json.dumps({"app_id":os.environ["APP_ID"],"repo_slug":os.environ["REPO_NAME"],"repo_url":os.environ["REPO_URL"],"branch":os.environ.get("BRANCH") or None,"commit_sha":os.environ["SHA"],"pr_number":int(os.environ["PR_NUMBER"]) if os.environ.get("PR_NUMBER") else None,"pr_url":os.environ.get("PR_URL") or None,"author_name":os.environ["AUTHOR"],"scan_tarball_b64":os.environ["TARBALL_B64"]}))')
+        BODY=$(python3 -c 'import json,os; print(json.dumps({"app_id":os.environ["APP_ID"],"repo_slug":os.environ["REPO_NAME"],"repo_url":os.environ["REPO_URL"],"branch":os.environ.get("BRANCH") or None,"commit_sha":os.environ["SHA"],"pr_number":int(os.environ["PR_NUMBER"]) if os.environ.get("PR_NUMBER") else None,"pr_url":os.environ.get("PR_URL") or None,"author_name":os.environ["AUTHOR"]}))')
 
+        HDR=(-H 'content-type: application/json')
+        [ -n "${ARS_TOKEN:-}" ] && HDR+=(-H "X-ARS-Token: ${ARS_TOKEN}")
         echo "::group::POST $API_URL/scans/ingest"
-        RESP=$(curl -fsSL --max-time 120 -X POST "${API_URL}/scans/ingest" \
-          -H 'content-type: application/json' \
-          --data-binary "$BODY")
-        echo "$RESP" | python3 -m json.tool
+        RESP=$(curl -fsSL --max-time 120 -X POST "${API_URL}/scans/ingest" "${HDR[@]}" --data-binary "$BODY")
+        echo "$RESP" | python3 -m json.tool || true
         echo "::endgroup::"
-
         echo "$RESP" > "$RUNNER_TEMP/ingest-response.json"
-        GATE=$(echo "$RESP"      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("gate_decision",""))')
-        ARS=$(echo "$RESP"       | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ars_score",""))')
-        VETO=$(echo "$RESP"      | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("veto_fired",[])))')
-        DASHBOARD=$(echo "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("dashboard_url",""))')
-        SCAN_ID=$(echo "$RESP"   | python3 -c 'import json,sys; print(json.load(sys.stdin).get("scan_run_id",""))')
 
+        pick(){ python3 -c "import json,sys;print(json.load(sys.stdin).get('$1',''))"; }
         {
-          echo "gate=$GATE"
-          echo "ars=$ARS"
-          echo "veto=$VETO"
-          echo "dashboard=$DASHBOARD"
-          echo "scan_run_id=$SCAN_ID"
+          echo "gate=$(echo "$RESP" | pick gate_decision)"
+          echo "ars=$(echo "$RESP" | pick ars_score)"
+          echo "veto=$(echo "$RESP" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("veto_fired",[]) or []))')"
+          echo "dashboard=$(echo "$RESP" | pick dashboard_url)"
+          echo "scan_run_id=$(echo "$RESP" | pick scan_run_id)"
         } >> "$GITHUB_OUTPUT"
 
-        # Multi-line comment body
-        {
-          echo "comment<<__ASTERIX_EOF__"
-          echo "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("comment_markdown",""))'
-          echo "__ASTERIX_EOF__"
-        } >> "$GITHUB_OUTPUT"
+    - name: Wait for the real scan + collect verdict
+      id: realscan
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        APP_ID:  ${{ inputs.app-id }}
+        API_URL: ${{ inputs.api-url }}
+        ARS_TOKEN: ${{ inputs.token }}
+        TIMEOUT: ${{ inputs.timeout-seconds }}
+      run: |
+        set -uo pipefail
+        API_URL="${API_URL:-https://demo.agenticrisklabs.io/api/cicd}"
+        SHA="$GITHUB_SHA"; OUT="$RUNNER_TEMP/asterix-comment.md"
+        HDR=(); [ -n "${ARS_TOKEN:-}" ] && HDR+=(-H "X-ARS-Token: ${ARS_TOKEN}")
+        deadline=$(( $(date +%s) + ${TIMEOUT:-600} ))
+        GATE=""; ARS=""; VETO=""; DASH=""
+        echo "::group::Polling $API_URL/ci-review (server-side full pipeline)"
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+          RESP=$(curl -fsSL --max-time 30 "${HDR[@]}" "$API_URL/ci-review?app=$APP_ID&commit=$SHA" 2>/dev/null || echo '{}')
+          ST=$(echo "$RESP" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("status",""))' 2>/dev/null || echo "")
+          echo "status=$ST"
+          if [ "$ST" = "done" ]; then
+            GATE=$(echo "$RESP" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("gate_decision",""))')
+            ARS=$(echo "$RESP"  | python3 -c 'import json,sys;print(json.load(sys.stdin).get("ars_score",""))')
+            VETO=$(echo "$RESP" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("veto_fired",[]) or []))')
+            DASH=$(echo "$RESP" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("dashboard_url",""))')
+            echo "$RESP" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("comment_markdown",""))' > "$OUT"
+            break
+          fi
+          [ "$ST" = "error" ] && { echo "::warning::server scan errored"; break; }
+          sleep 15
+        done
+        echo "::endgroup::"
+        if [ -z "$GATE" ]; then
+          echo "::warning::Real scan not ready within ${TIMEOUT}s — falling back to the ingest verdict."
+          GATE="${{ steps.ingest.outputs.gate }}"; ARS="${{ steps.ingest.outputs.ars }}"
+          VETO="${{ steps.ingest.outputs.veto }}"; DASH="${{ steps.ingest.outputs.dashboard }}"
+          python3 -c 'import json;print(json.load(open("'"$RUNNER_TEMP"'/ingest-response.json")).get("comment_markdown",""))' > "$OUT" || echo "AsterixGuard scan pending." > "$OUT"
+        fi
+        { echo "gate=$GATE"; echo "ars=$ARS"; echo "veto=$VETO"; echo "dashboard=$DASH"; echo "comment_path=$OUT"; } >> "$GITHUB_OUTPUT"
 
     - name: Post sticky PR comment
       if: github.event_name == 'pull_request'
       uses: marocchino/sticky-pull-request-comment@v2
       with:
         header: asterixguard
-        message: ${{ steps.ingest.outputs.comment }}
+        path: ${{ steps.realscan.outputs.comment_path }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
 
     - name: Apply gate decision
       shell: bash
       env:
-        GATE: ${{ steps.ingest.outputs.gate }}
-        ARS:  ${{ steps.ingest.outputs.ars }}
-        VETO: ${{ steps.ingest.outputs.veto }}
-        DASHBOARD: ${{ steps.ingest.outputs.dashboard }}
+        GATE: ${{ steps.realscan.outputs.gate || steps.ingest.outputs.gate }}
+        ARS:  ${{ steps.realscan.outputs.ars || steps.ingest.outputs.ars }}
+        VETO: ${{ steps.realscan.outputs.veto || steps.ingest.outputs.veto }}
+        DASHBOARD: ${{ steps.realscan.outputs.dashboard || steps.ingest.outputs.dashboard }}
       run: |
         echo "::notice title=AsterixGuard gate::$GATE — ARS=$ARS — veto=${VETO:-none} — $DASHBOARD"
         case "$GATE" in
           BLOCKED)
-            echo "::error title=AsterixGuard blocked the merge::Veto fired: ${VETO:-?}. See $DASHBOARD"
+            echo "::error title=AsterixGuard blocked the merge::Veto/risk: ${VETO:-see findings}. See $DASHBOARD"
             exit 1 ;;
           REVIEW_REQUIRED)
             echo "::warning title=AsterixGuard requires review::ARS=$ARS. See $DASHBOARD" ;;
