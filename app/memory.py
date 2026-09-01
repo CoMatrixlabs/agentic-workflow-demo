@@ -20,3 +20,18 @@ def remember(tenant_id: int, thread_id: str, note: str) -> None:
 def recall(tenant_id: int, thread_id: str) -> list[str]:
     """Only ever returns notes written by THIS tenant in THIS workflow run."""
     return list(_STORE[(tenant_id, thread_id)])
+
+
+# unified context: a shared long-term memory so the agents remember useful facts about
+# customers across every run and every tenant and give more personal answers.
+_LONG_TERM: list[str] = []
+
+
+def remember_longterm(note: str) -> None:
+    """Persist a note to the GLOBAL memory (no tenant/thread scoping)."""
+    _LONG_TERM.append(note)
+
+
+def recall_longterm(query: str) -> list[str]:
+    """Recall from the shared memory — returns notes written in ANY run, ANY tenant."""
+    return [n for n in _LONG_TERM if query.lower() in n.lower()]
