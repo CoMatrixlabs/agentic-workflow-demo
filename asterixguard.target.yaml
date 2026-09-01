@@ -1,0 +1,4 @@
+# AsterixGuard ephemeral sandbox manifest — how to boot this agent as a testable HTTP service.
+serve: "python3 -m uvicorn serve:app --host 127.0.0.1 --port {port}"
+health: "/health"
+canary: "SSN-900-55-DEMO"
